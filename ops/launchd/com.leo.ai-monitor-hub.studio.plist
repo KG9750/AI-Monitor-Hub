@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.leo.ai-monitor-hub.studio</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/leo/Library/Mobile Documents/com~apple~CloudDocs/Personal/Game Dev/New Monkey/AI-Monitor-Hub/scripts/report-node-snapshot.mjs</string>
+    <string>--node-id</string>
+    <string>studio</string>
+    <string>--target-dir</string>
+    <string>/Users/leo/Library/Mobile Documents/com~apple~CloudDocs/Personal/Game Dev/New Monkey/AI-Monitor-Hub/data/node-snapshots</string>
+    <string>--note</string>
+    <string>Mac Studio snapshot reporter</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/leo/Library/Mobile Documents/com~apple~CloudDocs/Personal/Game Dev/New Monkey/AI-Monitor-Hub</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>120</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/leo/Library/Logs/ai-monitor-hub/com.leo.ai-monitor-hub.studio.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/leo/Library/Logs/ai-monitor-hub/com.leo.ai-monitor-hub.studio.err.log</string>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

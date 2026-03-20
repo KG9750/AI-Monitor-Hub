@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Monitor Hub</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="ambient ambient-a"></div>
+    <div class="ambient ambient-b"></div>
+    <div class="ambient ambient-c"></div>
+
+    <div class="shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <p class="eyebrow">AI Monitor Hub</p>
+          <h1>Single Gateway Control Surface</h1>
+          <p class="lede">
+            依据附件架构方案收敛后的 OpenClaw 控制台。所有 Bot 统一映射到 M2
+            上的 Gateway，执行负载再下沉到 Mac Studio 与在线的 M4。
+          </p>
+        </div>
+        <div class="topbar-actions">
+          <button class="ghost-button" id="resetStateButton" type="button">
+            Refresh Live Data
+          </button>
+        </div>
+      </header>
+
+      <main class="dashboard">
+        <section class="panel hero-panel">
+          <div id="heroContent"></div>
+        </section>
+
+        <section class="panel">
+          <div class="section-heading">
+            <div>
+              <p class="section-kicker">Topology</p>
+              <h2>Node Fabric</h2>
+            </div>
+            <p class="section-copy">
+              选择节点查看职责边界。M2 是唯一控制面，Mac Studio 是重型执行层，
+              M4 只在在线时加入，不持有会话真相源。
+            </p>
+          </div>
+          <div class="chip-row" id="nodeFilters"></div>
+          <div class="node-grid" id="nodeGrid"></div>
+        </section>
+
+        <section class="split-layout">
+          <section class="panel route-panel">
+            <div class="section-heading">
+              <div>
+                <p class="section-kicker">Dispatch</p>
+                <h2>Routing Workbench</h2>
+              </div>
+              <p class="section-copy">
+                选择入口 Bot、频道、任务类型与负载级别，实时推演控制面与执行面的落点。
+              </p>
+            </div>
+
+            <form class="routing-form" id="routingForm">
+              <label>
+                Bot Persona
+                <select id="botSelect" name="botId"></select>
+              </label>
+              <label>
+                Channel
+                <select id="channelSelect" name="channelId"></select>
+              </label>
+              <label>
+                Request Type
+                <select id="requestSelect" name="requestTypeId"></select>
+              </label>
+              <label>
+                Load Profile
+                <select id="loadSelect" name="loadId"></select>
+              </label>
+              <label class="full-width">
+                Request Brief
+                <textarea
+                  id="requestBrief"
+                  name="brief"
+                  rows="4"
+                  placeholder="例如：请检查 Gateway 延迟升高的原因，并准备安全恢复方案。"
+                ></textarea>
+              </label>
+              <div class="form-actions">
+                <button class="primary-button" type="submit">Dispatch Request</button>
+              </div>
+            </form>
+
+            <div id="routingPreview"></div>
+          </section>
+
+          <aside class="panel detail-panel">
+            <div class="section-heading">
+              <div>
+                <p class="section-kicker">Selection</p>
+                <h2>Node Detail</h2>
+              </div>
+              <p class="section-copy">
+                当前选中的节点会显示推荐承载内容、禁区和可用状态。
+              </p>
+            </div>
+            <div id="nodeDetail"></div>
+
+            <div class="mini-divider"></div>
+
+            <div class="section-heading section-heading-compact">
+              <div>
+                <p class="section-kicker">Bots</p>
+                <h2>Surface Mapping</h2>
+              </div>
+            </div>
+            <div id="botSurface"></div>
+          </aside>
+        </section>
+
+        <section class="split-layout split-layout-secondary">
+          <section class="panel">
+            <div class="section-heading">
+              <div>
+                <p class="section-kicker">Governance</p>
+                <h2>Doctor Plane</h2>
+              </div>
+              <p class="section-copy">
+                Doctor 只负责观察、诊断、分级告警与有限自动修复，不参与普通任务编排。
+              </p>
+            </div>
+            <div id="doctorSummary"></div>
+            <div class="doctor-alerts" id="doctorAlerts"></div>
+          </section>
+
+          <section class="panel">
+            <div class="section-heading">
+              <div>
+                <p class="section-kicker">Architecture</p>
+                <h2>Revision Ledger</h2>
+              </div>
+              <p class="section-copy">
+                以下信息已按附件重新校正，避免把 Mac Studio 或 M4 当成隐性主控。
+              </p>
+            </div>
+            <div id="revisionLedger"></div>
+            <div class="mini-divider"></div>
+            <div class="section-heading section-heading-compact">
+              <div>
+                <p class="section-kicker">Phases</p>
+                <h2>Delivery Path</h2>
+              </div>
+            </div>
+            <div id="phaseTimeline"></div>
+            <div class="mini-divider"></div>
+            <div class="section-heading section-heading-compact">
+              <div>
+                <p class="section-kicker">Policy</p>
+                <h2>Approval Matrix</h2>
+              </div>
+            </div>
+            <div id="policyTable"></div>
+          </section>
+        </section>
+
+        <section class="panel">
+          <div class="section-heading">
+            <div>
+              <p class="section-kicker">Playback</p>
+              <h2>Activity Feed</h2>
+            </div>
+            <p class="section-copy">
+              每次分发、拦截、审批和修复都会回写到活动流，便于后续复盘。
+            </p>
+          </div>
+          <div id="activityFeed"></div>
+        </section>
+      </main>
+    </div>
+
+    <div id="modalHost"></div>
+    <div class="toast-host" id="toastHost"></div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

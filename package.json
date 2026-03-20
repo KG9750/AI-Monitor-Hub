@@ -1,0 +1,13 @@
+{
+  "name": "ai-monitor-hub",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node server.mjs",
+    "build": "node scripts/build.mjs",
+    "preview": "node server.mjs dist",
+    "snapshot:report": "node scripts/report-node-snapshot.mjs",
+    "launchd:generate": "node scripts/generate-launchd-plist.mjs"
+  }
+}

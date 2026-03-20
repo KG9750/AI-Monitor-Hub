@@ -1,0 +1,23 @@
+{
+  "studio": {
+    "updatedAt": "2026-03-20T16:20:00+08:00",
+    "online": true,
+    "cpuPercent": 46,
+    "latencyMs": 128,
+    "note": "Qwen host healthy"
+  },
+  "m4": {
+    "updatedAt": "2026-03-20T16:18:00+08:00",
+    "online": false,
+    "cpuPercent": 0,
+    "latencyMs": 0,
+    "note": "Office machine offline"
+  },
+  "edge-fleet": {
+    "updatedAt": "2026-03-20T16:19:00+08:00",
+    "online": true,
+    "cpuPercent": 12,
+    "latencyMs": 42,
+    "note": "Backup relay ready"
+  }
+}

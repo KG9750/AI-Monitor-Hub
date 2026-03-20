@@ -1,0 +1,4 @@
+dist/
+.DS_Store
+data/runtime-state.json
+data/node-snapshots/*.json
