@@ -97,6 +97,69 @@ const server = createServer(async (request, response) => {
       return sendJson(response, 200, await buildDashboardPayload(runtimeState));
     }
 
+    if (url.pathname === "/api/docker/logs" && request.method === "POST") {
+      const payload = await readJsonBody(request);
+      const runtimeState = await loadRuntimeState();
+      const result = await getDockerLogs(payload);
+      runtimeState.activityLog.unshift(
+        createActivity({
+          kind: "docker",
+          status: result.success ? "logs" : "logs-nonzero",
+          badge: "LOGS",
+          title: `${result.success ? "Logs fetched" : "Logs command returned non-zero"} from ${result.containerName || result.containerId}`,
+          body: `最近 ${result.tail} 行日志已拉取到控制台面板，退出码 ${result.code}.`,
+        }),
+      );
+      trimActivityLog(runtimeState);
+      await saveRuntimeState(runtimeState);
+      return sendJson(response, 200, {
+        dashboard: await buildDashboardPayload(runtimeState),
+        result,
+      });
+    }
+
+    if (url.pathname === "/api/docker/exec" && request.method === "POST") {
+      const payload = await readJsonBody(request);
+      const runtimeState = await loadRuntimeState();
+      const result = await execInDocker(payload);
+      runtimeState.activityLog.unshift(
+        createActivity({
+          kind: "docker",
+          status: result.success ? "exec-ok" : "exec-nonzero",
+          badge: "EXEC",
+          title: `${result.success ? "Command finished" : "Command exited non-zero"} in ${result.containerName || result.containerId}`,
+          body: `命令：${summarizeDockerCommand(result.command)}，退出码 ${result.code}.`,
+        }),
+      );
+      trimActivityLog(runtimeState);
+      await saveRuntimeState(runtimeState);
+      return sendJson(response, 200, {
+        dashboard: await buildDashboardPayload(runtimeState),
+        result,
+      });
+    }
+
+    if (url.pathname === "/api/docker/download" && request.method === "POST") {
+      const payload = await readJsonBody(request);
+      const runtimeState = await loadRuntimeState();
+      const result = await copyFileOutOfDocker(payload);
+      runtimeState.activityLog.unshift(
+        createActivity({
+          kind: "docker",
+          status: "downloaded",
+          badge: "PULL",
+          title: `File pulled from ${result.containerName || result.containerId}`,
+          body: `${result.sourcePath} 已拉回本地浏览器下载流。`,
+        }),
+      );
+      trimActivityLog(runtimeState);
+      await saveRuntimeState(runtimeState);
+      return sendJson(response, 200, {
+        dashboard: await buildDashboardPayload(runtimeState),
+        result,
+      });
+    }
+
     if (url.pathname === "/api/runtime/m4-toggle" && request.method === "POST") {
       const payload = await readJsonBody(request);
       const runtimeState = await loadRuntimeState();
@@ -690,31 +753,16 @@ async function stopDockerDesktop() {
 }
 
 async function copyFileIntoDocker(payload) {
-  const docker = await getDockerStatusSummary();
-  if (!docker.running) {
-    throw new Error("Docker daemon is not running.");
-  }
-
-  const containerId = String(payload.containerId || "").trim();
+  const { container, containerId } = await getDockerContainerScope(payload);
   const destinationPath = String(payload.destinationPath || "").trim();
   const fileName = basename(String(payload.fileName || "").trim() || "upload.bin");
   const fileContentBase64 = String(payload.fileContentBase64 || "");
 
-  if (!containerId) {
-    throw new Error("Container is required.");
-  }
   if (!destinationPath) {
     throw new Error("Destination path is required.");
   }
   if (!fileContentBase64) {
     throw new Error("Upload payload is empty.");
-  }
-
-  const container = docker.containers.find(
-    (entry) => entry.id === containerId || entry.name === containerId,
-  );
-  if (!container) {
-    throw new Error("Container was not found in the local Docker daemon.");
   }
 
   const buffer = Buffer.from(fileContentBase64, "base64");
@@ -749,6 +797,145 @@ async function copyFileIntoDocker(payload) {
       containerName: container.name,
       destination: dockerDestination,
       fileName,
+    };
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+}
+
+async function getDockerLogs(payload) {
+  const { container, containerId } = await getDockerContainerScope(payload);
+  const tail = sanitizeDockerTail(payload.tail);
+  const logsResult = await safeExecDetailed(
+    "docker",
+    ["logs", "--tail", String(tail), containerId],
+    {
+      timeout: 8000,
+      maxBuffer: 2 * 1024 * 1024,
+    },
+  );
+  const output = [logsResult.stdout, logsResult.stderr]
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+
+  if (!logsResult.success && !output) {
+    throw new Error(logsResult.output || "docker logs failed.");
+  }
+
+  return {
+    containerId,
+    containerName: container.name,
+    tail,
+    success: logsResult.success,
+    code: logsResult.code ?? (logsResult.success ? 0 : 1),
+    fetchedAt: new Date().toISOString(),
+    output: output || "No logs returned for this container.",
+  };
+}
+
+async function execInDocker(payload) {
+  const { container, containerId } = await getDockerContainerScope(payload, {
+    requireRunningContainer: true,
+  });
+  const command = String(payload.command || "").trim();
+
+  if (!command) {
+    throw new Error("Command is required.");
+  }
+  if (command.length > 4000) {
+    throw new Error("Command is too long. Please keep it below 4000 characters.");
+  }
+
+  const shellCandidates = [
+    ["/bin/sh", "-lc"],
+    ["sh", "-lc"],
+    ["/bin/bash", "-lc"],
+    ["bash", "-lc"],
+  ];
+  let shellUsed = shellCandidates[0][0];
+  let execResult = null;
+
+  for (const shellArgs of shellCandidates) {
+    shellUsed = shellArgs[0];
+    execResult = await safeExecDetailed(
+      "docker",
+      ["exec", containerId, ...shellArgs, command],
+      {
+        timeout: 20000,
+        maxBuffer: 4 * 1024 * 1024,
+      },
+    );
+    if (execResult.success || !isMissingDockerShell(execResult.output)) {
+      break;
+    }
+  }
+
+  const output = [execResult.stdout, execResult.stderr]
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+
+  return {
+    containerId,
+    containerName: container.name,
+    command,
+    shell: shellUsed,
+    success: execResult.success,
+    code: execResult.code ?? (execResult.success ? 0 : 1),
+    executedAt: new Date().toISOString(),
+    output: output || (execResult.success ? "Command completed without output." : execResult.output || "Command exited without output."),
+  };
+}
+
+async function copyFileOutOfDocker(payload) {
+  const { container, containerId } = await getDockerContainerScope(payload);
+  const sourcePath = String(payload.sourcePath || "").trim();
+
+  if (!sourcePath) {
+    throw new Error("Source path is required.");
+  }
+  if (sourcePath.endsWith("/")) {
+    throw new Error("Please provide a file path, not a directory path.");
+  }
+
+  const tempDir = await mkdtemp(join(os.tmpdir(), "ai-monitor-docker-pull-"));
+  const targetName = basename(sourcePath) || "download.bin";
+  const tempFilePath = join(tempDir, targetName);
+
+  try {
+    const copyResult = await safeExecDetailed(
+      "docker",
+      ["cp", `${containerId}:${sourcePath}`, tempFilePath],
+      {
+        timeout: 15000,
+      },
+    );
+
+    if (!copyResult.success) {
+      throw new Error(copyResult.output || "docker cp failed.");
+    }
+
+    const fileStat = await stat(tempFilePath);
+    if (fileStat.isDirectory()) {
+      throw new Error("Directory downloads are not supported in this UI yet.");
+    }
+
+    if (fileStat.size > 12 * 1024 * 1024) {
+      throw new Error("File is too large. Please keep Docker downloads below 12 MB in this UI.");
+    }
+
+    const buffer = await readFile(tempFilePath);
+
+    return {
+      containerId,
+      containerName: container.name,
+      sourcePath,
+      fileName: targetName,
+      sizeBytes: buffer.length,
+      mimeType: contentType(targetName).replace(/; charset=utf-8$/i, ""),
+      fileContentBase64: buffer.toString("base64"),
+      downloadedAt: new Date().toISOString(),
     };
   } finally {
     await rm(tempDir, { recursive: true, force: true });
@@ -947,6 +1134,35 @@ function parseJsonLines(text) {
     .filter(Boolean);
 }
 
+async function getDockerContainerScope(payload, options = {}) {
+  const docker = await getDockerStatusSummary();
+  if (!docker.running) {
+    throw new Error("Docker daemon is not running.");
+  }
+
+  const containerId = String(payload.containerId || "").trim();
+  if (!containerId) {
+    throw new Error("Container is required.");
+  }
+
+  const container = docker.containers.find(
+    (entry) => entry.id === containerId || entry.name === containerId,
+  );
+  if (!container) {
+    throw new Error("Container was not found in the local Docker daemon.");
+  }
+
+  if (options.requireRunningContainer && container.state !== "running") {
+    throw new Error("This action requires a running container.");
+  }
+
+  return {
+    docker,
+    containerId,
+    container,
+  };
+}
+
 function dockerStatusLabel({ appInstalled, clientAvailable, daemonReachable, permissionDenied }) {
   if (!appInstalled && !clientAvailable) {
     return "not-installed";
@@ -981,6 +1197,12 @@ function normalizeDockerState(value) {
   if (text.includes("up") || text.includes("running")) {
     return "running";
   }
+  if (text.includes("restart")) {
+    return "restarting";
+  }
+  if (text.includes("pause")) {
+    return "paused";
+  }
   if (text.includes("exited") || text.includes("stopped")) {
     return "stopped";
   }
@@ -988,6 +1210,26 @@ function normalizeDockerState(value) {
     return "created";
   }
   return text || "unknown";
+}
+
+function sanitizeDockerTail(value) {
+  const parsed = Number.parseInt(String(value || "200"), 10);
+  if (!Number.isFinite(parsed)) {
+    return 200;
+  }
+  return Math.min(500, Math.max(20, parsed));
+}
+
+function isMissingDockerShell(output) {
+  return /executable file not found|no such file or directory|stat .* no such file/i.test(output || "");
+}
+
+function summarizeDockerCommand(command) {
+  const text = String(command || "").replace(/\s+/g, " ").trim();
+  if (text.length <= 90) {
+    return text;
+  }
+  return `${text.slice(0, 87)}...`;
 }
 
 async function waitForDockerState(predicate, options = {}) {

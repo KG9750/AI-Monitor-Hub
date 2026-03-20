@@ -370,8 +370,19 @@ function createDefaultState() {
     dockerForm: {
       containerId: "",
       destinationPath: "/tmp/",
+      downloadPath: "/tmp/app.log",
+      execCommand: "pwd",
+      logsTail: "200",
     },
     modal: null,
+  };
+}
+
+function createDockerPanelState() {
+  return {
+    logs: null,
+    exec: null,
+    download: null,
   };
 }
 
@@ -409,6 +420,7 @@ function createFallbackRuntime() {
 
 let state = loadState();
 let runtime = createFallbackRuntime();
+let dockerPanel = createDockerPanelState();
 
 const refs = {
   hero: document.querySelector("#heroContent"),
@@ -670,16 +682,53 @@ function handleModalInput(event) {
   if (event.target.name === "containerId") {
     state.dockerForm.containerId = String(event.target.value || "").trim();
     saveState();
+    renderModal();
     return;
   }
 
   if (event.target.name === "destinationPath") {
     state.dockerForm.destinationPath = String(event.target.value || "");
     saveState();
+    return;
+  }
+
+  if (event.target.name === "downloadPath") {
+    state.dockerForm.downloadPath = String(event.target.value || "");
+    saveState();
+    return;
+  }
+
+  if (event.target.name === "execCommand") {
+    state.dockerForm.execCommand = String(event.target.value || "");
+    saveState();
+    return;
+  }
+
+  if (event.target.name === "logsTail") {
+    state.dockerForm.logsTail = String(event.target.value || "");
+    saveState();
   }
 }
 
 async function handleModalSubmit(event) {
+  if (event.target.id === "dockerLogsForm") {
+    event.preventDefault();
+    await handleDockerLogsSubmit(event.target);
+    return;
+  }
+
+  if (event.target.id === "dockerExecForm") {
+    event.preventDefault();
+    await handleDockerExecSubmit(event.target);
+    return;
+  }
+
+  if (event.target.id === "dockerDownloadForm") {
+    event.preventDefault();
+    await handleDockerDownloadSubmit(event.target);
+    return;
+  }
+
   if (event.target.id === "dockerCopyForm") {
     event.preventDefault();
     await handleDockerCopySubmit(event.target);
@@ -813,6 +862,108 @@ async function handleDockerCopySubmit(form) {
     toast(`已把 ${selectedFile.name} 发送到容器。`, "success");
   } catch (error) {
     toast(error.message || "文件传输到 Docker 失败。", "warning");
+  }
+}
+
+async function handleDockerLogsSubmit(form) {
+  const formData = new FormData(form);
+  const containerId = String(formData.get("containerId") || state.dockerForm.containerId || "").trim();
+  const tail = String(formData.get("tail") || state.dockerForm.logsTail || "200").trim();
+
+  if (!containerId) {
+    toast("请先选择目标容器。", "warning");
+    return;
+  }
+
+  try {
+    const payload = await apiRequest("/api/docker/logs", {
+      method: "POST",
+      body: {
+        containerId,
+        tail,
+      },
+    });
+    runtime = payload.dashboard;
+    dockerPanel.logs = payload.result;
+    state.dockerForm.containerId = containerId;
+    state.dockerForm.logsTail = tail;
+    state.modal = { type: "docker" };
+    saveState();
+    render();
+    toast(payload.result.success ? "容器日志已刷新。" : "日志命令返回了非零退出码。", payload.result.success ? "success" : "warning");
+  } catch (error) {
+    toast(error.message || "读取容器日志失败。", "warning");
+  }
+}
+
+async function handleDockerExecSubmit(form) {
+  const formData = new FormData(form);
+  const containerId = String(formData.get("containerId") || state.dockerForm.containerId || "").trim();
+  const command = String(formData.get("command") || state.dockerForm.execCommand || "").trim();
+
+  if (!containerId) {
+    toast("请先选择目标容器。", "warning");
+    return;
+  }
+  if (!command) {
+    toast("请填写要执行的命令。", "warning");
+    return;
+  }
+
+  try {
+    const payload = await apiRequest("/api/docker/exec", {
+      method: "POST",
+      body: {
+        containerId,
+        command,
+      },
+    });
+    runtime = payload.dashboard;
+    dockerPanel.exec = payload.result;
+    state.dockerForm.containerId = containerId;
+    state.dockerForm.execCommand = command;
+    state.modal = { type: "docker" };
+    saveState();
+    render();
+    toast(payload.result.success ? "容器命令执行完成。" : "命令已执行，但返回了非零退出码。", payload.result.success ? "success" : "warning");
+  } catch (error) {
+    toast(error.message || "执行容器命令失败。", "warning");
+  }
+}
+
+async function handleDockerDownloadSubmit(form) {
+  const formData = new FormData(form);
+  const containerId = String(formData.get("containerId") || state.dockerForm.containerId || "").trim();
+  const sourcePath = String(formData.get("sourcePath") || state.dockerForm.downloadPath || "").trim();
+
+  if (!containerId) {
+    toast("请先选择目标容器。", "warning");
+    return;
+  }
+  if (!sourcePath) {
+    toast("请填写容器内文件路径。", "warning");
+    return;
+  }
+
+  try {
+    const payload = await apiRequest("/api/docker/download", {
+      method: "POST",
+      body: {
+        containerId,
+        sourcePath,
+      },
+    });
+    runtime = payload.dashboard;
+    dockerPanel.download = payload.result;
+    state.dockerForm.containerId = containerId;
+    state.dockerForm.downloadPath = sourcePath;
+    state.modal = { type: "docker" };
+    saveState();
+    downloadBase64File(payload.result.fileName, payload.result.fileContentBase64, payload.result.mimeType);
+    render();
+    toast(`已从容器取回 ${payload.result.fileName}。`, "success");
+  } catch (error) {
+    toast(error.message || "从容器取回文件失败。", "warning");
   }
 }
 
@@ -1257,22 +1408,34 @@ function renderModal() {
 function renderDockerModal() {
   const docker = getDockerSummary();
   const containers = Array.isArray(docker.containers) ? docker.containers : [];
-  const canCopy = Boolean(docker.running && containers.length);
+  const canManageFiles = Boolean(docker.running && containers.length);
   const canStart = docker.status !== "running" && docker.status !== "not-installed";
   const canStop = Boolean(docker.running);
   const selectedContainerId =
     state.dockerForm.containerId && containers.some((entry) => entry.id === state.dockerForm.containerId)
       ? state.dockerForm.containerId
       : containers[0]?.id || "";
+  const selectedContainer = containers.find((entry) => entry.id === selectedContainerId) || null;
+  const canInspectContainer = Boolean(docker.running && selectedContainer);
+  const canExec = Boolean(canInspectContainer && selectedContainer?.state === "running");
 
   state.dockerForm.containerId = selectedContainerId;
   if (!state.dockerForm.destinationPath) {
     state.dockerForm.destinationPath = "/tmp/";
   }
+  if (!state.dockerForm.downloadPath) {
+    state.dockerForm.downloadPath = "/tmp/app.log";
+  }
+  if (!state.dockerForm.execCommand) {
+    state.dockerForm.execCommand = "pwd";
+  }
+  if (!state.dockerForm.logsTail) {
+    state.dockerForm.logsTail = "200";
+  }
 
   refs.modalHost.innerHTML = `
     <div class="modal-backdrop">
-      <div class="modal-card">
+      <div class="modal-card docker-modal-card">
         <div class="alert-meta">
           <span class="severity-pill ${dockerSeverityClass(docker.status)}">${escapeHtml(docker.status)}</span>
           <span class="inline-pill">${docker.contextName || "docker context unavailable"}</span>
@@ -1337,12 +1500,95 @@ function renderDockerModal() {
                 : `<div class="docker-empty">当前还没有可见容器。Docker 未运行、权限不足，或者本机还没有任何容器时都会出现这种状态。</div>`
             }
           </div>
+          <div class="docker-selected">
+            <p class="mini-label">Selected Container</p>
+            <h4>${escapeHtml(selectedContainer?.name || "No container selected")}</h4>
+            <p>${selectedContainer ? `${escapeHtml(selectedContainer.image || "unknown image")} · ${escapeHtml(selectedContainer.status || "no status")}` : "请先启动 Docker 并选择一个容器。"} </p>
+          </div>
+          <div class="mini-divider"></div>
+          <form class="modal-form" id="dockerLogsForm">
+            <input type="hidden" name="containerId" value="${escapeHtml(selectedContainerId)}" />
+            <div class="modal-grid">
+              <label>
+                Log Tail
+                <input
+                  name="tail"
+                  type="number"
+                  min="20"
+                  max="500"
+                  step="20"
+                  value="${escapeHtml(state.dockerForm.logsTail)}"
+                  ${canInspectContainer ? "" : "disabled"}
+                />
+              </label>
+              <label>
+                Target
+                <input value="${escapeHtml(selectedContainer?.name || "No container selected")}" disabled />
+              </label>
+            </div>
+            <p class="muted-copy">
+              拉取最近 N 行容器输出。停止中的容器也可以读取历史日志，只要本机 daemon 仍可达。
+            </p>
+            <div class="modal-actions">
+              <button class="secondary-button" type="submit" ${canInspectContainer ? "" : "disabled"}>Fetch Logs</button>
+            </div>
+          </form>
+          ${
+            dockerPanel.logs
+              ? `
+                <div class="docker-output-card">
+                  <div class="alert-meta">
+                    <span class="inline-pill">${escapeHtml(dockerPanel.logs.containerName || dockerPanel.logs.containerId || "container")}</span>
+                    <span class="inline-pill">tail ${escapeHtml(String(dockerPanel.logs.tail || 0))}</span>
+                    <span class="inline-pill">exit ${escapeHtml(String(dockerPanel.logs.code ?? 0))}</span>
+                    <span class="inline-pill">${escapeHtml(formatDateTime(dockerPanel.logs.fetchedAt))}</span>
+                  </div>
+                  <pre class="docker-output">${escapeHtml(dockerPanel.logs.output || "No logs returned.")}</pre>
+                </div>
+              `
+              : ""
+          }
+          <div class="mini-divider"></div>
+          <form class="modal-form" id="dockerExecForm">
+            <input type="hidden" name="containerId" value="${escapeHtml(selectedContainerId)}" />
+            <label>
+              Exec Command
+              <input
+                name="command"
+                value="${escapeHtml(state.dockerForm.execCommand)}"
+                placeholder="ls -la /app"
+                ${canExec ? "" : "disabled"}
+              />
+            </label>
+            <p class="muted-copy">
+              通过容器内 shell 执行一次性命令。只有运行中的容器会解锁这项能力。
+            </p>
+            <div class="modal-actions">
+              <button class="secondary-button" type="submit" ${canExec ? "" : "disabled"}>Run Command</button>
+            </div>
+          </form>
+          ${
+            dockerPanel.exec
+              ? `
+                <div class="docker-output-card">
+                  <div class="alert-meta">
+                    <span class="inline-pill">${escapeHtml(dockerPanel.exec.containerName || dockerPanel.exec.containerId || "container")}</span>
+                    <span class="inline-pill">exit ${escapeHtml(String(dockerPanel.exec.code ?? 0))}</span>
+                    <span class="inline-pill">${escapeHtml(dockerPanel.exec.success ? "success" : "non-zero exit")}</span>
+                    <span class="inline-pill">${escapeHtml(formatDateTime(dockerPanel.exec.executedAt))}</span>
+                  </div>
+                  <p class="policy-copy"><code>${escapeHtml(dockerPanel.exec.command || "")}</code></p>
+                  <pre class="docker-output">${escapeHtml(dockerPanel.exec.output || "Command returned no output.")}</pre>
+                </div>
+              `
+              : ""
+          }
           <div class="mini-divider"></div>
           <form class="modal-form" id="dockerCopyForm">
             <div class="modal-grid">
               <label>
                 Target Container
-                <select name="containerId" ${canCopy ? "" : "disabled"}>
+                <select name="containerId" ${canManageFiles ? "" : "disabled"}>
                   ${
                     containers.length
                       ? containers
@@ -1364,13 +1610,13 @@ function renderDockerModal() {
                   name="destinationPath"
                   value="${escapeHtml(state.dockerForm.destinationPath)}"
                   placeholder="/tmp/your-file.txt"
-                  ${canCopy ? "" : "disabled"}
+                  ${canManageFiles ? "" : "disabled"}
                 />
               </label>
             </div>
             <label class="file-picker">
               Select File
-              <input name="uploadFile" type="file" ${canCopy ? "" : "disabled"} />
+              <input name="uploadFile" type="file" ${canManageFiles ? "" : "disabled"} />
             </label>
             <p class="policy-copy">
               文件会通过浏览器上传到本地 API，然后执行 <code>docker cp</code> 复制进目标容器。若目标以 <code>/</code> 结尾，会自动附加原文件名。
@@ -1379,11 +1625,45 @@ function renderDockerModal() {
               点击上方容器卡片可以快速切换目标容器。只有当 daemon 可达且容器列表已加载时，文件投递表单才会解锁。
             </p>
             <div class="modal-actions">
-              <button class="primary-button" type="submit" ${canCopy ? "" : "disabled"}>
+              <button class="primary-button" type="submit" ${canManageFiles ? "" : "disabled"}>
                 Send File Into Container
               </button>
             </div>
           </form>
+          <div class="mini-divider"></div>
+          <form class="modal-form" id="dockerDownloadForm">
+            <input type="hidden" name="containerId" value="${escapeHtml(selectedContainerId)}" />
+            <label>
+              Source Path In Container
+              <input
+                name="sourcePath"
+                value="${escapeHtml(state.dockerForm.downloadPath)}"
+                placeholder="/var/log/app.log"
+                ${canInspectContainer ? "" : "disabled"}
+              />
+            </label>
+            <p class="muted-copy">
+              会先由本地 API 执行 <code>docker cp</code> 拉出目标文件，再在浏览器里触发下载。当前仅支持单文件，不支持目录打包。
+            </p>
+            <div class="modal-actions">
+              <button class="primary-button" type="submit" ${canInspectContainer ? "" : "disabled"}>Pull File To Local</button>
+            </div>
+          </form>
+          ${
+            dockerPanel.download
+              ? `
+                <div class="docker-output-card">
+                  <div class="alert-meta">
+                    <span class="inline-pill">${escapeHtml(dockerPanel.download.containerName || dockerPanel.download.containerId || "container")}</span>
+                    <span class="inline-pill">${escapeHtml(dockerPanel.download.fileName || "download.bin")}</span>
+                    <span class="inline-pill">${escapeHtml(formatFileSize(dockerPanel.download.sizeBytes || 0))}</span>
+                    <span class="inline-pill">${escapeHtml(formatDateTime(dockerPanel.download.downloadedAt))}</span>
+                  </div>
+                  <p class="policy-copy">已从 <code>${escapeHtml(dockerPanel.download.sourcePath || "")}</code> 取回并触发浏览器下载。</p>
+                </div>
+              `
+              : ""
+          }
         </div>
       </div>
     </div>
@@ -1686,6 +1966,55 @@ async function fileToBase64(file) {
   }
 
   return window.btoa(binary);
+}
+
+function downloadBase64File(fileName, base64Content, mimeType = "application/octet-stream") {
+  const binary = window.atob(base64Content);
+  const bytes = new Uint8Array(binary.length);
+
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+
+  const blob = new Blob([bytes], { type: mimeType });
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = fileName || "download.bin";
+  anchor.click();
+  window.setTimeout(() => {
+    URL.revokeObjectURL(objectUrl);
+  }, 1000);
+}
+
+function formatDateTime(value) {
+  if (!value) {
+    return "not recorded";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "invalid time";
+  }
+
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(date);
+}
+
+function formatFileSize(bytes) {
+  const value = Number(bytes || 0);
+  if (value < 1024) {
+    return `${value} B`;
+  }
+  if (value < 1024 * 1024) {
+    return `${(value / 1024).toFixed(1)} KB`;
+  }
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function toast(message, tone = "default") {

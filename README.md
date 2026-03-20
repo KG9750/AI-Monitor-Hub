@@ -28,6 +28,7 @@ AI Monitor Hub 现在被补成了一个带本地 API 的可运行控制台，用
   - 在控制台内启动或停止本地 Docker
   - 把选中的本地文件复制进目标容器
   - 通过点击容器卡片快速切换文件投递目标
+  - 拉取容器最近日志、执行单次命令、把容器内文件取回本地
 - 架构修订信息
   - 展示根据附件修正后的核心原则
   - 展示阶段落地计划与权限治理矩阵
@@ -178,6 +179,9 @@ npm run launchd:generate -- \
 - `POST /api/docker/start`
 - `POST /api/docker/stop`
 - `POST /api/docker/copy`
+- `POST /api/docker/logs`
+- `POST /api/docker/exec`
+- `POST /api/docker/download`
 
 其中 `docker/copy` 的请求体会包含：
 
@@ -192,12 +196,42 @@ npm run launchd:generate -- \
 
 如果 `destinationPath` 以 `/` 结尾，系统会自动拼接原文件名。
 
+`docker/logs` 请求体示例：
+
+```json
+{
+  "containerId": "your-container",
+  "tail": 200
+}
+```
+
+`docker/exec` 请求体示例：
+
+```json
+{
+  "containerId": "your-container",
+  "command": "ls -la /app"
+}
+```
+
+`docker/download` 请求体示例：
+
+```json
+{
+  "containerId": "your-container",
+  "sourcePath": "/var/log/app.log"
+}
+```
+
 注意：
 
 - 这套控制默认面向本机 Docker Desktop
 - 启动使用 `open -a Docker`
 - 停止使用 `osascript -e 'quit app "Docker"'`
 - 文件复制使用 `docker cp`
+- 命令执行使用 `docker exec`
+- 日志查看使用 `docker logs --tail`
+- 文件取回也通过 `docker cp`，再由浏览器触发下载
 - 启停动作会等待 daemon 状态实际变化几轮后再回写到界面，减少“命令已发出但状态还没变”的错觉
 
 ## 附件对齐后的关键信息
