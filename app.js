@@ -367,6 +367,10 @@ function createDefaultState() {
       loadId: "interactive",
       brief: "请检查当前 Gateway 架构是否符合 M2 单中心控制面的原则。",
     },
+    dockerForm: {
+      containerId: "",
+      destinationPath: "/tmp/",
+    },
     modal: null,
   };
 }
@@ -382,6 +386,19 @@ function createFallbackRuntime() {
     repo: {
       branch: "unknown",
       dirtyCount: 0,
+    },
+    docker: {
+      installed: false,
+      appInstalled: false,
+      clientAvailable: false,
+      running: false,
+      status: "unknown",
+      detail: "Docker status has not been loaded yet.",
+      clientVersion: null,
+      serverVersion: null,
+      contextName: null,
+      containers: [],
+      runningCount: 0,
     },
     m4DispatchEnabled: false,
     nodes: [],
@@ -415,6 +432,8 @@ const refs = {
   modalHost: document.querySelector("#modalHost"),
   toastHost: document.querySelector("#toastHost"),
   resetStateButton: document.querySelector("#resetStateButton"),
+  dockerMenuButton: document.querySelector("#dockerMenuButton"),
+  dockerMenuSummary: document.querySelector("#dockerMenuSummary"),
 };
 
 void bootstrap();
@@ -440,13 +459,25 @@ function bindEvents() {
   refs.doctorAlerts.addEventListener("click", handleDoctorActions);
   refs.botSurface.addEventListener("click", handleBotCardClick);
   refs.modalHost.addEventListener("click", handleModalClick);
+  refs.modalHost.addEventListener("input", handleModalInput);
+  refs.modalHost.addEventListener("change", handleModalInput);
   refs.modalHost.addEventListener("submit", handleModalSubmit);
   refs.resetStateButton.addEventListener("click", handleResetState);
+  refs.dockerMenuButton.addEventListener("click", handleOpenDockerModal);
 }
 
 async function handleResetState() {
   await refreshDashboard();
   toast("已重新拉取实时数据。", "success");
+}
+
+async function handleOpenDockerModal() {
+  await refreshDashboard({ silent: true });
+  state.modal = {
+    type: "docker",
+  };
+  saveState();
+  renderModal();
 }
 
 function handleFormInput(event) {
@@ -609,7 +640,21 @@ async function handleDoctorActions(event) {
   }
 }
 
-function handleModalClick(event) {
+async function handleModalClick(event) {
+  const dockerActionButton = event.target.closest("[data-docker-action]");
+  if (dockerActionButton) {
+    await handleDockerAction(dockerActionButton.dataset.dockerAction);
+    return;
+  }
+
+  const containerCard = event.target.closest("[data-select-container]");
+  if (containerCard) {
+    state.dockerForm.containerId = containerCard.dataset.selectContainer || "";
+    saveState();
+    renderModal();
+    return;
+  }
+
   if (event.target.matches("[data-close-modal]") || event.target === refs.modalHost.firstElementChild) {
     state.modal = null;
     saveState();
@@ -617,7 +662,30 @@ function handleModalClick(event) {
   }
 }
 
+function handleModalInput(event) {
+  if (state.modal?.type !== "docker") {
+    return;
+  }
+
+  if (event.target.name === "containerId") {
+    state.dockerForm.containerId = String(event.target.value || "").trim();
+    saveState();
+    return;
+  }
+
+  if (event.target.name === "destinationPath") {
+    state.dockerForm.destinationPath = String(event.target.value || "");
+    saveState();
+  }
+}
+
 async function handleModalSubmit(event) {
+  if (event.target.id === "dockerCopyForm") {
+    event.preventDefault();
+    await handleDockerCopySubmit(event.target);
+    return;
+  }
+
   if (event.target.id !== "approvalForm") {
     return;
   }
@@ -678,8 +746,79 @@ async function handleModalSubmit(event) {
   }
 }
 
+async function handleDockerAction(action) {
+  if (action === "refresh") {
+    await refreshDashboard();
+    state.modal = { type: "docker" };
+    saveState();
+    renderModal();
+    toast("Docker 状态已刷新。", "success");
+    return;
+  }
+
+  const endpoint = action === "start" ? "/api/docker/start" : action === "stop" ? "/api/docker/stop" : null;
+  if (!endpoint) {
+    return;
+  }
+
+  try {
+    runtime = await apiRequest(endpoint, {
+      method: "POST",
+    });
+    state.modal = { type: "docker" };
+    saveState();
+    render();
+    toast(action === "start" ? "Docker 启动请求已发送。" : "Docker 停止请求已发送。", "success");
+  } catch (error) {
+    toast(error.message || "Docker 动作执行失败。", "warning");
+  }
+}
+
+async function handleDockerCopySubmit(form) {
+  const fileInput = form.querySelector('input[name="uploadFile"]');
+  const selectedFile = fileInput?.files?.[0];
+  const formData = new FormData(form);
+  const containerId = String(formData.get("containerId") || "").trim();
+  const destinationPath = String(formData.get("destinationPath") || "").trim();
+
+  if (!containerId) {
+    toast("请选择目标容器。", "warning");
+    return;
+  }
+  if (!destinationPath) {
+    toast("请填写容器内目标路径。", "warning");
+    return;
+  }
+  if (!selectedFile) {
+    toast("请先选择要传输的文件。", "warning");
+    return;
+  }
+
+  try {
+    const fileContentBase64 = await fileToBase64(selectedFile);
+    runtime = await apiRequest("/api/docker/copy", {
+      method: "POST",
+      body: {
+        containerId,
+        destinationPath,
+        fileName: selectedFile.name,
+        fileContentBase64,
+      },
+    });
+    state.dockerForm.containerId = containerId;
+    state.dockerForm.destinationPath = destinationPath;
+    state.modal = { type: "docker" };
+    saveState();
+    render();
+    toast(`已把 ${selectedFile.name} 发送到容器。`, "success");
+  } catch (error) {
+    toast(error.message || "文件传输到 Docker 失败。", "warning");
+  }
+}
+
 function render() {
   syncFormControls();
+  renderTopbar();
   renderHero();
   renderNodeFilters();
   renderNodeGrid();
@@ -693,6 +832,13 @@ function render() {
   renderPolicyTable();
   renderActivityFeed();
   renderModal();
+}
+
+function renderTopbar() {
+  const docker = getDockerSummary();
+  refs.dockerMenuSummary.textContent = dockerTopbarLabel(docker);
+  refs.dockerMenuSummary.className = `topbar-badge ${docker.status}`;
+  refs.dockerMenuButton.title = docker.detail || "Open Docker control";
 }
 
 function renderHero() {
@@ -1042,6 +1188,11 @@ function renderModal() {
     return;
   }
 
+  if (state.modal.type === "docker") {
+    renderDockerModal();
+    return;
+  }
+
   const alert = getAlert(state.modal.alertId);
   if (!alert) {
     state.modal = null;
@@ -1098,6 +1249,142 @@ function renderModal() {
             <button class="secondary-button" type="button" data-close-modal>Cancel</button>
           </div>
         </form>
+      </div>
+    </div>
+  `;
+}
+
+function renderDockerModal() {
+  const docker = getDockerSummary();
+  const containers = Array.isArray(docker.containers) ? docker.containers : [];
+  const canCopy = Boolean(docker.running && containers.length);
+  const canStart = docker.status !== "running" && docker.status !== "not-installed";
+  const canStop = Boolean(docker.running);
+  const selectedContainerId =
+    state.dockerForm.containerId && containers.some((entry) => entry.id === state.dockerForm.containerId)
+      ? state.dockerForm.containerId
+      : containers[0]?.id || "";
+
+  state.dockerForm.containerId = selectedContainerId;
+  if (!state.dockerForm.destinationPath) {
+    state.dockerForm.destinationPath = "/tmp/";
+  }
+
+  refs.modalHost.innerHTML = `
+    <div class="modal-backdrop">
+      <div class="modal-card">
+        <div class="alert-meta">
+          <span class="severity-pill ${dockerSeverityClass(docker.status)}">${escapeHtml(docker.status)}</span>
+          <span class="inline-pill">${docker.contextName || "docker context unavailable"}</span>
+          <span class="inline-pill">${docker.runningCount || 0} running</span>
+        </div>
+        <h3>Local Docker Control</h3>
+        <p>${escapeHtml(docker.detail || "Use this panel to control Docker Desktop and send files into local containers.")}</p>
+        <div class="docker-modal-stack">
+          <div class="docker-status-grid">
+            <article class="docker-card">
+              <p class="mini-label">Client</p>
+              <h4>${escapeHtml(docker.clientVersion || "not detected")}</h4>
+              <p>${docker.appInstalled ? "Docker Desktop installed" : "Docker Desktop not found in /Applications"}</p>
+            </article>
+            <article class="docker-card">
+              <p class="mini-label">Daemon</p>
+              <h4>${docker.running ? "Reachable" : "Unavailable"}</h4>
+              <p>${escapeHtml(docker.serverVersion || "server version unavailable")}</p>
+            </article>
+            <article class="docker-card">
+              <p class="mini-label">Containers</p>
+              <h4>${containers.length}</h4>
+              <p>${docker.running ? "Enumerated from docker ps -a" : "Start Docker to enumerate containers"}</p>
+            </article>
+          </div>
+          <div class="modal-actions">
+            <button class="primary-button" type="button" data-docker-action="start" ${canStart ? "" : "disabled"}>
+              Start Docker
+            </button>
+            <button class="secondary-button" type="button" data-docker-action="stop" ${canStop ? "" : "disabled"}>
+              Stop Docker
+            </button>
+            <button class="secondary-button" type="button" data-docker-action="refresh">Refresh Status</button>
+            <button class="secondary-button" type="button" data-close-modal>Close</button>
+          </div>
+          <div class="mini-divider"></div>
+          <div>
+            <p class="mini-label">Containers</p>
+            ${
+              containers.length
+                ? `<div class="docker-container-list">
+                    ${containers
+                      .map(
+                        (container) => `
+                          <button
+                            class="docker-container-card ${container.id === selectedContainerId ? "selected" : ""}"
+                            type="button"
+                            data-select-container="${escapeHtml(container.id)}"
+                            title="Use ${escapeHtml(container.name || container.id)} as the upload target"
+                          >
+                            <div class="alert-meta">
+                              <span class="inline-pill">${escapeHtml(container.name || container.id)}</span>
+                              <span class="severity-pill ${container.state === "running" ? "low" : "medium"}">${escapeHtml(container.state || "unknown")}</span>
+                            </div>
+                            <h4>${escapeHtml(container.image || "unknown image")}</h4>
+                            <p>${escapeHtml(container.status || "No status text returned by docker.")}</p>
+                          </button>
+                        `,
+                      )
+                      .join("")}
+                  </div>`
+                : `<div class="docker-empty">当前还没有可见容器。Docker 未运行、权限不足，或者本机还没有任何容器时都会出现这种状态。</div>`
+            }
+          </div>
+          <div class="mini-divider"></div>
+          <form class="modal-form" id="dockerCopyForm">
+            <div class="modal-grid">
+              <label>
+                Target Container
+                <select name="containerId" ${canCopy ? "" : "disabled"}>
+                  ${
+                    containers.length
+                      ? containers
+                          .map(
+                            (container) => `
+                              <option value="${escapeHtml(container.id)}" ${container.id === selectedContainerId ? "selected" : ""}>
+                                ${escapeHtml(container.name || container.id)} · ${escapeHtml(container.image || "")}
+                              </option>
+                            `,
+                          )
+                          .join("")
+                      : `<option value="">No containers available</option>`
+                  }
+                </select>
+              </label>
+              <label>
+                Destination Path
+                <input
+                  name="destinationPath"
+                  value="${escapeHtml(state.dockerForm.destinationPath)}"
+                  placeholder="/tmp/your-file.txt"
+                  ${canCopy ? "" : "disabled"}
+                />
+              </label>
+            </div>
+            <label class="file-picker">
+              Select File
+              <input name="uploadFile" type="file" ${canCopy ? "" : "disabled"} />
+            </label>
+            <p class="policy-copy">
+              文件会通过浏览器上传到本地 API，然后执行 <code>docker cp</code> 复制进目标容器。若目标以 <code>/</code> 结尾，会自动附加原文件名。
+            </p>
+            <p class="muted-copy">
+              点击上方容器卡片可以快速切换目标容器。只有当 daemon 可达且容器列表已加载时，文件投递表单才会解锁。
+            </p>
+            <div class="modal-actions">
+              <button class="primary-button" type="submit" ${canCopy ? "" : "disabled"}>
+                Send File Into Container
+              </button>
+            </div>
+          </form>
+        </div>
       </div>
     </div>
   `;
@@ -1224,6 +1511,10 @@ function getLoad(loadId) {
   return LOADS.find((load) => load.id === loadId) || LOADS[0];
 }
 
+function getDockerSummary() {
+  return runtime.docker || createFallbackRuntime().docker;
+}
+
 function populateSelect(select, list, valueKey, labelKey) {
   select.innerHTML = list
     .map((entry) => `<option value="${entry[valueKey]}">${entry[labelKey]}</option>`)
@@ -1308,6 +1599,10 @@ function loadState() {
         ...base.form,
         ...(parsed.form || {}),
       },
+      dockerForm: {
+        ...base.dockerForm,
+        ...(parsed.dockerForm || {}),
+      },
       modal: null,
     };
   } catch {
@@ -1351,6 +1646,46 @@ async function apiRequest(path, options = {}) {
   }
 
   return payload;
+}
+
+function dockerTopbarLabel(docker) {
+  if (docker.status === "running") {
+    return `${docker.runningCount || 0} running`;
+  }
+  if (docker.status === "stopped") {
+    return "Stopped";
+  }
+  if (docker.status === "permission-denied") {
+    return "No socket access";
+  }
+  if (docker.status === "not-installed") {
+    return "Not installed";
+  }
+  return "Checking";
+}
+
+function dockerSeverityClass(status) {
+  if (status === "running") {
+    return "low";
+  }
+  if (status === "stopped" || status === "permission-denied") {
+    return "medium";
+  }
+  return "high";
+}
+
+async function fileToBase64(file) {
+  const buffer = await file.arrayBuffer();
+  let binary = "";
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    const chunk = bytes.subarray(offset, offset + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+
+  return window.btoa(binary);
 }
 
 function toast(message, tone = "default") {

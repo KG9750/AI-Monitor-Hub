@@ -5,13 +5,15 @@ import { createReadStream, existsSync } from "node:fs";
 import {
   access,
   mkdir,
+  mkdtemp,
   readFile,
   readdir,
+  rm,
   stat,
   writeFile,
 } from "node:fs/promises";
 import os from "node:os";
-import { dirname, extname, join, normalize, resolve } from "node:path";
+import { basename, dirname, extname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const execFileAsync = promisify(execFile);
@@ -33,6 +35,66 @@ const server = createServer(async (request, response) => {
 
     if (url.pathname === "/api/dashboard" && request.method === "GET") {
       return sendJson(response, 200, await buildDashboardPayload());
+    }
+
+    if (url.pathname === "/api/docker/status" && request.method === "GET") {
+      return sendJson(response, 200, await getDockerStatusSummary());
+    }
+
+    if (url.pathname === "/api/docker/start" && request.method === "POST") {
+      const runtimeState = await loadRuntimeState();
+      const docker = await startDockerDesktop();
+      runtimeState.activityLog.unshift(
+        createActivity({
+          kind: "docker",
+          status: docker.running ? "running" : "starting",
+          badge: "DOCKER",
+          title: docker.running ? "Docker is running" : "Docker start requested",
+          body: docker.running
+            ? "Docker daemon is reachable and container control is available."
+            : docker.detail || "Docker Desktop start command was sent. It may need a moment to become ready.",
+        }),
+      );
+      trimActivityLog(runtimeState);
+      await saveRuntimeState(runtimeState);
+      return sendJson(response, 200, await buildDashboardPayload(runtimeState));
+    }
+
+    if (url.pathname === "/api/docker/stop" && request.method === "POST") {
+      const runtimeState = await loadRuntimeState();
+      const docker = await stopDockerDesktop();
+      runtimeState.activityLog.unshift(
+        createActivity({
+          kind: "docker",
+          status: docker.running ? "stopping" : "stopped",
+          badge: "DOCKER",
+          title: docker.running ? "Docker stop requested" : "Docker is stopped",
+          body: docker.running
+            ? docker.detail || "Docker Desktop quit command was sent and is still settling."
+            : docker.detail || "Docker Desktop is no longer reachable from the local daemon socket.",
+        }),
+      );
+      trimActivityLog(runtimeState);
+      await saveRuntimeState(runtimeState);
+      return sendJson(response, 200, await buildDashboardPayload(runtimeState));
+    }
+
+    if (url.pathname === "/api/docker/copy" && request.method === "POST") {
+      const payload = await readJsonBody(request);
+      const runtimeState = await loadRuntimeState();
+      const result = await copyFileIntoDocker(payload);
+      runtimeState.activityLog.unshift(
+        createActivity({
+          kind: "docker",
+          status: "copied",
+          badge: "COPY",
+          title: `File sent to ${result.containerName || result.containerId}`,
+          body: `${result.fileName} 已复制到 ${result.destination}。`,
+        }),
+      );
+      trimActivityLog(runtimeState);
+      await saveRuntimeState(runtimeState);
+      return sendJson(response, 200, await buildDashboardPayload(runtimeState));
     }
 
     if (url.pathname === "/api/runtime/m4-toggle" && request.method === "POST") {
@@ -155,12 +217,14 @@ export async function buildDashboardPayload(preloadedRuntimeState) {
   const remoteSnapshots = remoteSnapshotData.snapshots;
   const nodes = buildNodeRuntime(localSignals, remoteSnapshots, runtimeState);
   const alerts = buildAlerts(localSignals, remoteSnapshots, runtimeState);
+  const docker = await getDockerStatusSummary();
 
   return {
     generatedAt: new Date().toISOString(),
     sourceMode: "live",
     repo: localSignals.repo,
     m4DispatchEnabled: runtimeState.m4DispatchEnabled,
+    docker,
     nodes,
     alerts,
     activities: runtimeState.activityLog,
@@ -508,6 +572,189 @@ async function getRepoSignals() {
   };
 }
 
+async function getDockerStatusSummary() {
+  const appInstalled = existsSync("/Applications/Docker.app");
+  const versionResult = await safeExecDetailed("docker", ["version", "--format", "{{json .}}"], {
+    timeout: 4000,
+  });
+  const versionInfo = parseEmbeddedJson(versionResult.output);
+  const clientVersion = versionInfo?.Client?.Version || null;
+  const serverVersion = versionInfo?.Server?.Version || null;
+  const contextName = versionInfo?.Client?.Context || null;
+  const daemonReachable = Boolean(serverVersion);
+  const permissionDenied = /permission denied/i.test(versionResult.output);
+  const clientAvailable = Boolean(clientVersion) || !/not found|ENOENT/i.test(versionResult.output);
+
+  let containers = [];
+  if (daemonReachable) {
+    const psResult = await safeExecDetailed(
+      "docker",
+      ["ps", "-a", "--format", "{{json .}}"],
+      { timeout: 4000 },
+    );
+    containers = parseJsonLines(psResult.stdout).map((entry) => ({
+      id: entry.ID || "",
+      name: entry.Names || entry.Name || "",
+      image: entry.Image || "",
+      status: entry.Status || "",
+      state: normalizeDockerState(entry.State || entry.Status || ""),
+      runningFor: entry.RunningFor || "",
+    }));
+  }
+
+  return {
+    installed: appInstalled || clientAvailable,
+    appInstalled,
+    clientAvailable,
+    running: daemonReachable,
+    status: dockerStatusLabel({ appInstalled, clientAvailable, daemonReachable, permissionDenied }),
+    detail: dockerDetailMessage({
+      appInstalled,
+      clientAvailable,
+      daemonReachable,
+      permissionDenied,
+      output: versionResult.output,
+    }),
+    clientVersion,
+    serverVersion,
+    contextName,
+    containers,
+    runningCount: containers.filter((entry) => entry.state === "running").length,
+  };
+}
+
+async function startDockerDesktop() {
+  if (!existsSync("/Applications/Docker.app")) {
+    return {
+      installed: false,
+      running: false,
+      status: "not-installed",
+      detail: "Docker.app is not installed in /Applications.",
+      containers: [],
+      runningCount: 0,
+      clientAvailable: false,
+      appInstalled: false,
+      clientVersion: null,
+      serverVersion: null,
+      contextName: null,
+    };
+  }
+
+  await safeExecDetailed("open", ["-a", "Docker"], { timeout: 4000 });
+  const docker = await waitForDockerState((status) => status.running, {
+    attempts: 8,
+    intervalMs: 1500,
+  });
+
+  if (docker.running) {
+    return docker;
+  }
+
+  return {
+    ...docker,
+    detail: "Docker Desktop start command was sent. The daemon is still warming up.",
+  };
+}
+
+async function stopDockerDesktop() {
+  if (!existsSync("/Applications/Docker.app")) {
+    return {
+      installed: false,
+      running: false,
+      status: "not-installed",
+      detail: "Docker.app is not installed in /Applications.",
+      containers: [],
+      runningCount: 0,
+      clientAvailable: false,
+      appInstalled: false,
+      clientVersion: null,
+      serverVersion: null,
+      contextName: null,
+    };
+  }
+
+  await safeExecDetailed("osascript", ["-e", 'quit app "Docker"'], { timeout: 5000 });
+  const docker = await waitForDockerState((status) => !status.running, {
+    attempts: 6,
+    intervalMs: 1200,
+  });
+
+  if (!docker.running) {
+    return docker;
+  }
+
+  return {
+    ...docker,
+    detail: "Docker quit command was sent, but the daemon still appears to be shutting down.",
+  };
+}
+
+async function copyFileIntoDocker(payload) {
+  const docker = await getDockerStatusSummary();
+  if (!docker.running) {
+    throw new Error("Docker daemon is not running.");
+  }
+
+  const containerId = String(payload.containerId || "").trim();
+  const destinationPath = String(payload.destinationPath || "").trim();
+  const fileName = basename(String(payload.fileName || "").trim() || "upload.bin");
+  const fileContentBase64 = String(payload.fileContentBase64 || "");
+
+  if (!containerId) {
+    throw new Error("Container is required.");
+  }
+  if (!destinationPath) {
+    throw new Error("Destination path is required.");
+  }
+  if (!fileContentBase64) {
+    throw new Error("Upload payload is empty.");
+  }
+
+  const container = docker.containers.find(
+    (entry) => entry.id === containerId || entry.name === containerId,
+  );
+  if (!container) {
+    throw new Error("Container was not found in the local Docker daemon.");
+  }
+
+  const buffer = Buffer.from(fileContentBase64, "base64");
+  if (!buffer.length) {
+    throw new Error("Upload payload could not be decoded.");
+  }
+  if (buffer.length > 25 * 1024 * 1024) {
+    throw new Error("File is too large. Please keep Docker uploads below 25 MB in this UI.");
+  }
+
+  const tempDir = await mkdtemp(join(os.tmpdir(), "ai-monitor-docker-"));
+  const tempFilePath = join(tempDir, fileName);
+  const dockerDestination =
+    destinationPath.endsWith("/") ? `${destinationPath}${fileName}` : destinationPath;
+
+  try {
+    await writeFile(tempFilePath, buffer);
+    const copyResult = await safeExecDetailed("docker", [
+      "cp",
+      tempFilePath,
+      `${containerId}:${dockerDestination}`,
+    ], {
+      timeout: 15000,
+    });
+
+    if (!copyResult.success) {
+      throw new Error(copyResult.output || "docker cp failed.");
+    }
+
+    return {
+      containerId,
+      containerName: container.name,
+      destination: dockerDestination,
+      fileName,
+    };
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+}
+
 async function serveStaticFile(pathname, response) {
   const normalizedPath = pathname === "/" ? "/index.html" : pathname;
   const safePath = normalize(normalizedPath).replace(/^(\.\.[/\\])+/, "");
@@ -601,6 +848,34 @@ async function safeExec(command, args, options = {}) {
   }
 }
 
+async function safeExecDetailed(command, args, options = {}) {
+  try {
+    const { stdout, stderr } = await execFileAsync(command, args, {
+      cwd: options.cwd,
+      timeout: options.timeout ?? 4000,
+      maxBuffer: options.maxBuffer ?? 8 * 1024 * 1024,
+    });
+    return {
+      success: true,
+      code: 0,
+      stdout,
+      stderr,
+      output: [stdout, stderr].filter(Boolean).join("\n").trim(),
+    };
+  } catch (error) {
+    return {
+      success: false,
+      code: error.code ?? 1,
+      stdout: error.stdout || "",
+      stderr: error.stderr || "",
+      output: [error.stdout || "", error.stderr || "", error.message || ""]
+        .filter(Boolean)
+        .join("\n")
+        .trim(),
+    };
+  }
+}
+
 function percent(part, whole) {
   if (!whole) {
     return 0;
@@ -638,4 +913,107 @@ function safeSystemValue(reader, fallback) {
   } catch {
     return fallback;
   }
+}
+
+function parseEmbeddedJson(text) {
+  const line = String(text || "")
+    .split("\n")
+    .map((entry) => entry.trim())
+    .find((entry) => entry.startsWith("{") && entry.endsWith("}"));
+
+  if (!line) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(line);
+  } catch {
+    return null;
+  }
+}
+
+function parseJsonLines(text) {
+  return String(text || "")
+    .split("\n")
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      try {
+        return JSON.parse(entry);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+
+function dockerStatusLabel({ appInstalled, clientAvailable, daemonReachable, permissionDenied }) {
+  if (!appInstalled && !clientAvailable) {
+    return "not-installed";
+  }
+  if (daemonReachable) {
+    return "running";
+  }
+  if (permissionDenied) {
+    return "permission-denied";
+  }
+  return "stopped";
+}
+
+function dockerDetailMessage({ appInstalled, clientAvailable, daemonReachable, permissionDenied, output }) {
+  if (!appInstalled && !clientAvailable) {
+    return "Docker CLI and Docker Desktop are not available on this machine.";
+  }
+  if (daemonReachable) {
+    return "Docker daemon is reachable and ready for container operations.";
+  }
+  if (permissionDenied) {
+    return "Docker CLI exists, but the daemon socket denied access. Check local permissions or desktop session context.";
+  }
+  if (/Cannot connect|error during connect|daemon/i.test(output || "")) {
+    return "Docker Desktop is installed, but the daemon is not running yet.";
+  }
+  return "Docker status could not be confirmed yet.";
+}
+
+function normalizeDockerState(value) {
+  const text = String(value || "").toLowerCase();
+  if (text.includes("up") || text.includes("running")) {
+    return "running";
+  }
+  if (text.includes("exited") || text.includes("stopped")) {
+    return "stopped";
+  }
+  if (text.includes("created")) {
+    return "created";
+  }
+  return text || "unknown";
+}
+
+async function waitForDockerState(predicate, options = {}) {
+  const attempts = Math.max(1, Number(options.attempts || 1));
+  const intervalMs = Math.max(0, Number(options.intervalMs || 0));
+  let lastStatus = await getDockerStatusSummary();
+
+  if (predicate(lastStatus)) {
+    return lastStatus;
+  }
+
+  for (let attempt = 1; attempt < attempts; attempt += 1) {
+    if (intervalMs) {
+      await delay(intervalMs);
+    }
+    lastStatus = await getDockerStatusSummary();
+    if (predicate(lastStatus)) {
+      return lastStatus;
+    }
+  }
+
+  return lastStatus;
+}
+
+function delay(ms) {
+  return new Promise((resolveDelay) => {
+    setTimeout(resolveDelay, ms);
+  });
 }

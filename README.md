@@ -23,6 +23,11 @@ AI Monitor Hub 现在被补成了一个带本地 API 的可运行控制台，用
   - 低风险动作立即执行
   - 中高风险动作进入审批面板
   - 高风险动作要求人工确认短语
+- Docker 菜单栏控制
+  - 查看本机 Docker Desktop / daemon / 容器状态
+  - 在控制台内启动或停止本地 Docker
+  - 把选中的本地文件复制进目标容器
+  - 通过点击容器卡片快速切换文件投递目标
 - 架构修订信息
   - 展示根据附件修正后的核心原则
   - 展示阶段落地计划与权限治理矩阵
@@ -50,7 +55,7 @@ npm run build
 - `index.html`: 页面骨架
 - `styles.css`: 界面样式与响应式布局
 - `app.js`: 前端交互逻辑、轮询与 API 调用
-- `server.mjs`: 本地 API、实时指标采集与运行态持久化
+- `server.mjs`: 本地 API、实时指标采集、运行态持久化，以及本机 Docker 状态/控制
 - `data/remote-node-snapshots.example.json`: 远端节点快照格式示例
 - `data/node-snapshots/`: 每个远端节点独立写入自己的实时快照文件
 - `scripts/report-node-snapshot.mjs`: 远端节点上报脚本
@@ -73,6 +78,10 @@ npm run build
 - 本地运行态源
   - 用户动作会落盘到 `data/runtime-state.json`
   - 包括 `M4` burst 路由开关、审批结果、Doctor 处理记录、活动流
+- 本机 Docker 源
+  - 顶栏 Docker 菜单会调用本地 API 读取 Docker Desktop 与 daemon 状态
+  - 可执行启动、停止以及向容器内复制文件
+  - 文件传输通过浏览器上传到本地 API，再执行 `docker cp`
 
 ## 远端快照示例
 
@@ -158,6 +167,38 @@ npm run launchd:generate -- \
 ```
 
 完整安装命令见 `ops/launchd/README.md`。
+
+## Docker 控制
+
+顶栏新增了 `Docker Control` 按钮，会显示当前 Docker 状态。
+
+后端提供以下能力：
+
+- `GET /api/docker/status`
+- `POST /api/docker/start`
+- `POST /api/docker/stop`
+- `POST /api/docker/copy`
+
+其中 `docker/copy` 的请求体会包含：
+
+```json
+{
+  "containerId": "your-container",
+  "destinationPath": "/tmp/",
+  "fileName": "example.txt",
+  "fileContentBase64": "..."
+}
+```
+
+如果 `destinationPath` 以 `/` 结尾，系统会自动拼接原文件名。
+
+注意：
+
+- 这套控制默认面向本机 Docker Desktop
+- 启动使用 `open -a Docker`
+- 停止使用 `osascript -e 'quit app "Docker"'`
+- 文件复制使用 `docker cp`
+- 启停动作会等待 daemon 状态实际变化几轮后再回写到界面，减少“命令已发出但状态还没变”的错觉
 
 ## 附件对齐后的关键信息
 
