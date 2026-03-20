@@ -812,6 +812,37 @@ input:focus {
   margin: 0;
 }
 
+.docker-pill-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
+.docker-insight-grid {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  margin-top: 1rem;
+}
+
+.docker-stat-chip {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.8rem 0.9rem;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(122, 217, 214, 0.14);
+  background: rgba(3, 17, 22, 0.78);
+}
+
+.docker-stat-chip strong {
+  font-size: 0.95rem;
+  line-height: 1.35;
+}
+
+.docker-container-actions {
+  margin-top: 1rem;
+}
+
 .docker-output-card {
   display: grid;
   gap: 0.75rem;

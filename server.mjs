@@ -160,6 +160,69 @@ const server = createServer(async (request, response) => {
       });
     }
 
+    if (url.pathname === "/api/docker/container/start" && request.method === "POST") {
+      const payload = await readJsonBody(request);
+      const runtimeState = await loadRuntimeState();
+      const result = await controlDockerContainer(payload, "start");
+      runtimeState.activityLog.unshift(
+        createActivity({
+          kind: "docker",
+          status: result.running ? "container-running" : "container-starting",
+          badge: "START",
+          title: `${result.containerName || result.containerId} start requested`,
+          body: result.status || "Container start command completed.",
+        }),
+      );
+      trimActivityLog(runtimeState);
+      await saveRuntimeState(runtimeState);
+      return sendJson(response, 200, {
+        dashboard: await buildDashboardPayload(runtimeState),
+        result,
+      });
+    }
+
+    if (url.pathname === "/api/docker/container/stop" && request.method === "POST") {
+      const payload = await readJsonBody(request);
+      const runtimeState = await loadRuntimeState();
+      const result = await controlDockerContainer(payload, "stop");
+      runtimeState.activityLog.unshift(
+        createActivity({
+          kind: "docker",
+          status: result.running ? "container-stopping" : "container-stopped",
+          badge: "STOP",
+          title: `${result.containerName || result.containerId} stop requested`,
+          body: result.status || "Container stop command completed.",
+        }),
+      );
+      trimActivityLog(runtimeState);
+      await saveRuntimeState(runtimeState);
+      return sendJson(response, 200, {
+        dashboard: await buildDashboardPayload(runtimeState),
+        result,
+      });
+    }
+
+    if (url.pathname === "/api/docker/container/restart" && request.method === "POST") {
+      const payload = await readJsonBody(request);
+      const runtimeState = await loadRuntimeState();
+      const result = await controlDockerContainer(payload, "restart");
+      runtimeState.activityLog.unshift(
+        createActivity({
+          kind: "docker",
+          status: result.running ? "container-running" : "container-restarting",
+          badge: "RESTART",
+          title: `${result.containerName || result.containerId} restart requested`,
+          body: result.status || "Container restart command completed.",
+        }),
+      );
+      trimActivityLog(runtimeState);
+      await saveRuntimeState(runtimeState);
+      return sendJson(response, 200, {
+        dashboard: await buildDashboardPayload(runtimeState),
+        result,
+      });
+    }
+
     if (url.pathname === "/api/runtime/m4-toggle" && request.method === "POST") {
       const payload = await readJsonBody(request);
       const runtimeState = await loadRuntimeState();
@@ -650,19 +713,60 @@ async function getDockerStatusSummary() {
 
   let containers = [];
   if (daemonReachable) {
+    const statsResult = await safeExecDetailed(
+      "docker",
+      ["stats", "--no-stream", "--format", "{{json .}}"],
+      {
+        timeout: 6000,
+        maxBuffer: 4 * 1024 * 1024,
+      },
+    );
+    const statsByContainer = new Map();
+    for (const entry of parseJsonLines(statsResult.stdout)) {
+      const statEntry = {
+        cpuText: entry.CPUPerc || null,
+        cpuPercent: parseDockerPercent(entry.CPUPerc),
+        memoryText: entry.MemUsage || null,
+        memoryPercentText: entry.MemPerc || null,
+        memoryPercent: parseDockerPercent(entry.MemPerc),
+        netIO: entry.NetIO || null,
+        blockIO: entry.BlockIO || null,
+        pids: entry.PIDs || null,
+      };
+      if (entry.ID) {
+        statsByContainer.set(entry.ID, statEntry);
+      }
+      if (entry.Name || entry.Container) {
+        statsByContainer.set(entry.Name || entry.Container, statEntry);
+      }
+    }
+
     const psResult = await safeExecDetailed(
       "docker",
       ["ps", "-a", "--format", "{{json .}}"],
       { timeout: 4000 },
     );
-    containers = parseJsonLines(psResult.stdout).map((entry) => ({
-      id: entry.ID || "",
-      name: entry.Names || entry.Name || "",
-      image: entry.Image || "",
-      status: entry.Status || "",
-      state: normalizeDockerState(entry.State || entry.Status || ""),
-      runningFor: entry.RunningFor || "",
-    }));
+    containers = parseJsonLines(psResult.stdout).map((entry) => {
+      const stats = statsByContainer.get(entry.ID || "") || statsByContainer.get(entry.Names || entry.Name || "");
+
+      return {
+        id: entry.ID || "",
+        name: entry.Names || entry.Name || "",
+        image: entry.Image || "",
+        status: entry.Status || "",
+        state: normalizeDockerState(entry.State || entry.Status || ""),
+        runningFor: entry.RunningFor || "",
+        liveStats: Boolean(stats),
+        cpuText: stats?.cpuText || null,
+        cpuPercent: stats?.cpuPercent ?? null,
+        memoryText: stats?.memoryText || null,
+        memoryPercentText: stats?.memoryPercentText || null,
+        memoryPercent: stats?.memoryPercent ?? null,
+        netIO: stats?.netIO || null,
+        blockIO: stats?.blockIO || null,
+        pids: stats?.pids || null,
+      };
+    });
   }
 
   return {
@@ -942,6 +1046,51 @@ async function copyFileOutOfDocker(payload) {
   }
 }
 
+async function controlDockerContainer(payload, action) {
+  const { container, containerId } = await getDockerContainerScope(payload);
+  const command =
+    action === "start"
+      ? "start"
+      : action === "stop"
+        ? "stop"
+        : action === "restart"
+          ? "restart"
+          : null;
+
+  if (!command) {
+    throw new Error("Unsupported container action.");
+  }
+
+  const commandResult = await safeExecDetailed("docker", [command, containerId], {
+    timeout: 25000,
+  });
+  if (!commandResult.success) {
+    throw new Error(commandResult.output || `docker ${command} failed.`);
+  }
+
+  const nextContainer = await waitForContainerState(
+    containerId,
+    (entry) =>
+      action === "stop"
+        ? !entry || !["running", "restarting"].includes(entry.state)
+        : entry?.state === "running",
+    {
+      attempts: action === "restart" ? 8 : 6,
+      intervalMs: action === "stop" ? 1200 : 1500,
+    },
+  );
+
+  return {
+    containerId,
+    containerName: nextContainer?.name || container.name,
+    action,
+    state: nextContainer?.state || (action === "stop" ? "stopped" : "unknown"),
+    running: nextContainer?.state === "running",
+    status: nextContainer?.status || commandResult.stdout.trim() || commandResult.output || "",
+    changedAt: new Date().toISOString(),
+  };
+}
+
 async function serveStaticFile(pathname, response) {
   const normalizedPath = pathname === "/" ? "/index.html" : pathname;
   const safePath = normalize(normalizedPath).replace(/^(\.\.[/\\])+/, "");
@@ -1134,6 +1283,14 @@ function parseJsonLines(text) {
     .filter(Boolean);
 }
 
+function parseDockerPercent(value) {
+  const numeric = Number.parseFloat(String(value || "").replace("%", "").trim());
+  if (!Number.isFinite(numeric)) {
+    return null;
+  }
+  return numeric;
+}
+
 async function getDockerContainerScope(payload, options = {}) {
   const docker = await getDockerStatusSummary();
   if (!docker.running) {
@@ -1230,6 +1387,25 @@ function summarizeDockerCommand(command) {
     return text;
   }
   return `${text.slice(0, 87)}...`;
+}
+
+async function waitForContainerState(containerId, predicate, options = {}) {
+  const attempts = Math.max(1, Number(options.attempts || 1));
+  const intervalMs = Math.max(0, Number(options.intervalMs || 0));
+  let lastContainer = null;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (attempt > 0 && intervalMs) {
+      await delay(intervalMs);
+    }
+    const docker = await getDockerStatusSummary();
+    lastContainer = docker.containers.find((entry) => entry.id === containerId || entry.name === containerId) || null;
+    if (predicate(lastContainer)) {
+      return lastContainer;
+    }
+  }
+
+  return lastContainer;
 }
 
 async function waitForDockerState(predicate, options = {}) {

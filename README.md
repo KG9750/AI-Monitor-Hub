@@ -26,6 +26,8 @@ AI Monitor Hub 现在被补成了一个带本地 API 的可运行控制台，用
 - Docker 菜单栏控制
   - 查看本机 Docker Desktop / daemon / 容器状态
   - 在控制台内启动或停止本地 Docker
+  - 对单个容器执行 start / stop / restart
+  - 展示容器 CPU、内存、网络、块设备 I/O 和 PIDs
   - 把选中的本地文件复制进目标容器
   - 通过点击容器卡片快速切换文件投递目标
   - 拉取容器最近日志、执行单次命令、把容器内文件取回本地
@@ -182,6 +184,9 @@ npm run launchd:generate -- \
 - `POST /api/docker/logs`
 - `POST /api/docker/exec`
 - `POST /api/docker/download`
+- `POST /api/docker/container/start`
+- `POST /api/docker/container/stop`
+- `POST /api/docker/container/restart`
 
 其中 `docker/copy` 的请求体会包含：
 
@@ -223,14 +228,24 @@ npm run launchd:generate -- \
 }
 ```
 
+单容器启停的请求体示例：
+
+```json
+{
+  "containerId": "your-container"
+}
+```
+
 注意：
 
 - 这套控制默认面向本机 Docker Desktop
 - 启动使用 `open -a Docker`
 - 停止使用 `osascript -e 'quit app "Docker"'`
 - 文件复制使用 `docker cp`
+- 单容器启停使用 `docker start` / `docker stop` / `docker restart`
 - 命令执行使用 `docker exec`
 - 日志查看使用 `docker logs --tail`
+- 资源监控使用 `docker stats --no-stream`
 - 文件取回也通过 `docker cp`，再由浏览器触发下载
 - 启停动作会等待 daemon 状态实际变化几轮后再回写到界面，减少“命令已发出但状态还没变”的错觉
 

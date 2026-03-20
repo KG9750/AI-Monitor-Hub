@@ -386,6 +386,10 @@ function createDockerPanelState() {
   };
 }
 
+function resetDockerPanel() {
+  dockerPanel = createDockerPanelState();
+}
+
 function createFallbackRuntime() {
   return {
     generatedAt: null,
@@ -485,6 +489,7 @@ async function handleResetState() {
 
 async function handleOpenDockerModal() {
   await refreshDashboard({ silent: true });
+  resetDockerPanel();
   state.modal = {
     type: "docker",
   };
@@ -659,9 +664,19 @@ async function handleModalClick(event) {
     return;
   }
 
+  const dockerContainerActionButton = event.target.closest("[data-docker-container-action]");
+  if (dockerContainerActionButton) {
+    await handleDockerContainerAction(
+      dockerContainerActionButton.dataset.dockerContainerAction,
+      dockerContainerActionButton.dataset.containerId,
+    );
+    return;
+  }
+
   const containerCard = event.target.closest("[data-select-container]");
   if (containerCard) {
     state.dockerForm.containerId = containerCard.dataset.selectContainer || "";
+    resetDockerPanel();
     saveState();
     renderModal();
     return;
@@ -681,6 +696,7 @@ function handleModalInput(event) {
 
   if (event.target.name === "containerId") {
     state.dockerForm.containerId = String(event.target.value || "").trim();
+    resetDockerPanel();
     saveState();
     renderModal();
     return;
@@ -820,6 +836,46 @@ async function handleDockerAction(action) {
     toast(action === "start" ? "Docker 启动请求已发送。" : "Docker 停止请求已发送。", "success");
   } catch (error) {
     toast(error.message || "Docker 动作执行失败。", "warning");
+  }
+}
+
+async function handleDockerContainerAction(action, containerId) {
+  const endpoint =
+    action === "start"
+      ? "/api/docker/container/start"
+      : action === "stop"
+        ? "/api/docker/container/stop"
+        : action === "restart"
+          ? "/api/docker/container/restart"
+          : null;
+
+  if (!endpoint || !containerId) {
+    return;
+  }
+
+  try {
+    const payload = await apiRequest(endpoint, {
+      method: "POST",
+      body: {
+        containerId,
+      },
+    });
+    runtime = payload.dashboard;
+    state.dockerForm.containerId = containerId;
+    resetDockerPanel();
+    state.modal = { type: "docker" };
+    saveState();
+    render();
+    toast(
+      action === "start"
+        ? "容器启动请求已发送。"
+        : action === "stop"
+          ? "容器停止请求已发送。"
+          : "容器重启请求已发送。",
+      "success",
+    );
+  } catch (error) {
+    toast(error.message || "容器状态切换失败。", "warning");
   }
 }
 
@@ -1418,6 +1474,9 @@ function renderDockerModal() {
   const selectedContainer = containers.find((entry) => entry.id === selectedContainerId) || null;
   const canInspectContainer = Boolean(docker.running && selectedContainer);
   const canExec = Boolean(canInspectContainer && selectedContainer?.state === "running");
+  const canStartContainer = Boolean(selectedContainer && ["stopped", "created"].includes(selectedContainer.state));
+  const canStopContainer = Boolean(selectedContainer && ["running", "restarting", "paused"].includes(selectedContainer.state));
+  const canRestartContainer = Boolean(selectedContainer && ["running", "restarting", "paused"].includes(selectedContainer.state));
 
   state.dockerForm.containerId = selectedContainerId;
   if (!state.dockerForm.destinationPath) {
@@ -1492,6 +1551,11 @@ function renderDockerModal() {
                             </div>
                             <h4>${escapeHtml(container.image || "unknown image")}</h4>
                             <p>${escapeHtml(container.status || "No status text returned by docker.")}</p>
+                            <div class="docker-pill-row">
+                              <span class="inline-pill">${escapeHtml(container.cpuText || "CPU n/a")}</span>
+                              <span class="inline-pill">${escapeHtml(container.memoryPercentText || "Mem n/a")}</span>
+                              <span class="inline-pill">${escapeHtml(container.runningFor || "No age data")}</span>
+                            </div>
                           </button>
                         `,
                       )
@@ -1504,6 +1568,67 @@ function renderDockerModal() {
             <p class="mini-label">Selected Container</p>
             <h4>${escapeHtml(selectedContainer?.name || "No container selected")}</h4>
             <p>${selectedContainer ? `${escapeHtml(selectedContainer.image || "unknown image")} · ${escapeHtml(selectedContainer.status || "no status")}` : "请先启动 Docker 并选择一个容器。"} </p>
+            ${
+              selectedContainer
+                ? `
+                  <div class="docker-insight-grid">
+                    <article class="docker-stat-chip">
+                      <span class="mini-label">CPU</span>
+                      <strong>${escapeHtml(selectedContainer.cpuText || "n/a")}</strong>
+                    </article>
+                    <article class="docker-stat-chip">
+                      <span class="mini-label">Memory</span>
+                      <strong>${escapeHtml(selectedContainer.memoryText || "n/a")}</strong>
+                    </article>
+                    <article class="docker-stat-chip">
+                      <span class="mini-label">Net I/O</span>
+                      <strong>${escapeHtml(selectedContainer.netIO || "n/a")}</strong>
+                    </article>
+                    <article class="docker-stat-chip">
+                      <span class="mini-label">Block I/O</span>
+                      <strong>${escapeHtml(selectedContainer.blockIO || "n/a")}</strong>
+                    </article>
+                    <article class="docker-stat-chip">
+                      <span class="mini-label">PIDs</span>
+                      <strong>${escapeHtml(selectedContainer.pids || "n/a")}</strong>
+                    </article>
+                    <article class="docker-stat-chip">
+                      <span class="mini-label">Runtime</span>
+                      <strong>${escapeHtml(selectedContainer.runningFor || "n/a")}</strong>
+                    </article>
+                  </div>
+                  <div class="modal-actions docker-container-actions">
+                    <button
+                      class="primary-button"
+                      type="button"
+                      data-docker-container-action="start"
+                      data-container-id="${escapeHtml(selectedContainer.id)}"
+                      ${canStartContainer ? "" : "disabled"}
+                    >
+                      Start Container
+                    </button>
+                    <button
+                      class="secondary-button"
+                      type="button"
+                      data-docker-container-action="stop"
+                      data-container-id="${escapeHtml(selectedContainer.id)}"
+                      ${canStopContainer ? "" : "disabled"}
+                    >
+                      Stop Container
+                    </button>
+                    <button
+                      class="secondary-button"
+                      type="button"
+                      data-docker-container-action="restart"
+                      data-container-id="${escapeHtml(selectedContainer.id)}"
+                      ${canRestartContainer ? "" : "disabled"}
+                    >
+                      Restart Container
+                    </button>
+                  </div>
+                `
+                : ""
+            }
           </div>
           <div class="mini-divider"></div>
           <form class="modal-form" id="dockerLogsForm">
